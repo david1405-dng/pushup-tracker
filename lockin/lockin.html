@@ -1,1 +1,247 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Push-Up Tracker - Fixed Front Mode</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+    <style>
+        body { text-align: center; font-family: Arial, sans-serif; background: #121212; color: white; margin: 0; padding: 15px; }
+        .container { position: relative; display: inline-block; margin-top: 10px; }
+        video { transform: scaleX(-1); display: none; }
+        canvas { transform: scaleX(-1); border-radius: 12px; background: #000; }
+        .score-board {
+            position: absolute; top: 15px; left: 15px;
+            background: rgba(0,0,0,0.85); padding: 8px 18px;
+            border-radius: 8px; font-size: 26px; font-weight: bold; color: #00ff88;
+            border: 2px solid #00ff88;
+        }
+        .controls { margin-bottom: 10px; }
+        .btn {
+            background: #222; color: white; border: 2px solid #444;
+            padding: 8px 16px; font-size: 15px; font-weight: bold;
+            border-radius: 6px; cursor: pointer; margin: 0 4px; transition: 0.2s;
+        }
+        .btn-mode.active { background: #00ff88; color: #000; border-color: #00ff88; }
+        .btn-reset { background: #ff3355; color: white; border-color: #ff3355; }
+        .status { margin-top: 8px; font-size: 15px; color: #00ff88; font-weight: bold; }
+    </style>
+</head>
+<body>
 
+    <h2>Push-Up Tracker</h2>
+    <div class="controls">
+        <span>Góc quay Cam: </span>
+        <button class="btn btn-mode active" id="btnSide" onclick="setMode('side')">Góc Nghiêng</button>
+        <button class="btn btn-mode" id="btnFront" onclick="setMode('front')">Chính Diện</button>
+        <button class="btn btn-reset" onclick="resetCounter()">Reset Số</button>
+    </div>
+
+    <div class="container">
+        <video id="webcam" autoplay playsinline></video>
+        <canvas id="output_canvas" width="640" height="480"></canvas>
+        <div class="score-board">REPS: <span id="count">0</span></div>
+    </div>
+    <div class="status" id="status">Chờ nhận diện người...</div>
+
+    <script>
+        const videoElement = document.getElementById('webcam');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const countElement = document.getElementById('count');
+        const statusElement = document.getElementById('status');
+        const btnSide = document.getElementById('btnSide');
+        const btnFront = document.getElementById('btnFront');
+
+        let count = 0;
+        let stage = 'UP';
+        let currentMode = 'side';
+        let lastRepTime = 0;
+        let plankFrames = 0;
+
+        function setMode(mode) {
+            currentMode = mode;
+            btnSide.classList.toggle('active', mode === 'side');
+            btnFront.classList.toggle('active', mode === 'front');
+            stage = 'UP';
+            plankFrames = 0;
+        }
+
+        function resetCounter() {
+            count = 0;
+            stage = 'UP';
+            plankFrames = 0;
+            countElement.innerText = count;
+        }
+
+        function calculateAngle(a, b, c) {
+            const radians = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
+            let angle = Math.abs((radians * 180.0) / Math.PI);
+            return angle > 180.0 ? 360 - angle : angle;
+        }
+
+        function checkVis(lm) {
+            return lm && (lm.visibility === undefined || lm.visibility > 0.35);
+        }
+
+        // ==========================================
+        // MODULE 1: GÓC NGHIÊNG (GIỮ NGUYÊN)
+        // ==========================================
+        function processSideView(lm) {
+            const lShoulder = lm[11], rShoulder = lm[12];
+            const lElbow = lm[13], rElbow = lm[14];
+            const lWrist = lm[15], rWrist = lm[16];
+            const lHip = lm[23], rHip = lm[24];
+
+            if (!checkVis(lShoulder) || !checkVis(rShoulder) || !checkVis(lHip) || !checkVis(rHip)) {
+                plankFrames = 0;
+                statusElement.innerText = "[Góc Nghiêng] Cần thấy rõ Vai và Hông...";
+                return;
+            }
+
+            const avgShoulderY = (lShoulder.y + rShoulder.y) / 2;
+            const avgWristY = (lWrist.y + rWrist.y) / 2;
+            const avgHipY = (lHip.y + rHip.y) / 2;
+
+            const isStanding = (avgHipY - avgShoulderY) > 0.22;
+            const isDownOnFloor = avgShoulderY > 0.35 && avgWristY > 0.35;
+            const isHorizontal = Math.abs(avgShoulderY - avgHipY) < 0.18;
+
+            if (isStanding || !isDownOnFloor || !isHorizontal) {
+                plankFrames = 0;
+                statusElement.innerText = "Chờ vào tư thế hít đất (Đang đứng/di chuyển)...";
+                return;
+            }
+
+            plankFrames++;
+            if (plankFrames < 3) return;
+
+            const leftArmValid = checkVis(lElbow) && checkVis(lWrist);
+            const rightArmValid = checkVis(rElbow) && checkVis(rWrist);
+
+            let elbowAngle = 180;
+            if (leftArmValid && rightArmValid) {
+                elbowAngle = (calculateAngle(lShoulder, lElbow, lWrist) + calculateAngle(rShoulder, rElbow, rWrist)) / 2;
+            } else if (leftArmValid) {
+                elbowAngle = calculateAngle(lShoulder, lElbow, lWrist);
+            } else if (rightArmValid) {
+                elbowAngle = calculateAngle(rShoulder, rElbow, rWrist);
+            }
+
+            statusElement.innerText = `[Góc Nghiêng] Góc tay: ${Math.round(elbowAngle)}° | Stage: ${stage}`;
+
+            const currentTime = Date.now();
+            if (stage === 'UP' && elbowAngle < 100) {
+                stage = 'DOWN';
+            } else if (stage === 'DOWN' && elbowAngle > 145) {
+                if (currentTime - lastRepTime > 500) {
+                    count++;
+                    countElement.innerText = count;
+                    lastRepTime = currentTime;
+                }
+                stage = 'UP';
+            }
+        }
+
+        // ==========================================
+        // MODULE 2: GÓC CHÍNH DIỆN (SỬA ĐỔI TRIỆT ĐỂ)
+        // ==========================================
+        function processFrontView(lm) {
+            const lShoulder = lm[11], rShoulder = lm[12];
+            const lElbow = lm[13], rElbow = lm[14];
+
+            // 1. Kiểm tra nhận diện 4 điểm cốt lõi (2 Vai, 2 Cùi tay)
+            if (!checkVis(lShoulder) || !checkVis(rShoulder) || !checkVis(lElbow) || !checkVis(rElbow)) {
+                plankFrames = 0;
+                statusElement.innerText = "[Chính Diện] Hãy điều chỉnh camera thấy rõ 2 Vai và 2 Cùi tay...";
+                return;
+            }
+
+            const avgShoulderY = (lShoulder.y + rShoulder.y) / 2;
+            const avgElbowY = (lElbow.y + rElbow.y) / 2;
+            const shoulderWidth = Math.abs(lShoulder.x - rShoulder.x);
+
+            // 2. Kiểm tra tư thế nằm hít đất (Chống nhảy số khi đứng / đi lại)
+            const isBodyLow = avgShoulderY > 0.28;
+            const isShoulderHorizontal = Math.abs(lShoulder.y - rShoulder.y) < 0.15;
+            const isFacingCamera = shoulderWidth > 0.12;
+
+            if (!isBodyLow || !isShoulderHorizontal || !isFacingCamera) {
+                plankFrames = 0;
+                statusElement.innerText = "Chờ vào tư thế hít đất (Đang đứng/di chuyển)...";
+                return;
+            }
+
+            plankFrames++;
+            if (plankFrames < 3) return;
+
+            // 3. Thuật toán đếm Rep chuẩn hóa theo khoảng cách
+            // heightRatio = (Y_Cùi_tay - Y_Vai) / Rộng_vai
+            // UP  -> Vai nâng cao hơn Cùi tay (heightRatio > 0.35)
+            // DOWN-> Vai hạ thấp bằng Cùi tay (heightRatio < 0.15)
+            const shoulderToElbowDiff = avgElbowY - avgShoulderY;
+            const heightRatio = shoulderToElbowDiff / (shoulderWidth || 1);
+
+            statusElement.innerText = `[Chính Diện] Tỉ lệ hạ người: ${heightRatio.toFixed(2)} | Stage: ${stage}`;
+
+            const currentTime = Date.now();
+
+            if (stage === 'UP' && heightRatio < 0.15) {
+                stage = 'DOWN';
+            } 
+            else if (stage === 'DOWN' && heightRatio > 0.35) {
+                if (currentTime - lastRepTime > 500) {
+                    count++;
+                    countElement.innerText = count;
+                    lastRepTime = currentTime;
+                }
+                stage = 'UP';
+            }
+        }
+
+        // ==========================================
+        // VÒNG LẶP XỬ LÝ CAMERA
+        // ==========================================
+        function onResults(results) {
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.poseLandmarks) {
+                drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, {color: '#00FF88', lineWidth: 2});
+                drawLandmarks(canvasCtx, results.poseLandmarks, {color: '#FF0055', lineWidth: 1, radius: 3});
+
+                if (currentMode === 'side') {
+                    processSideView(results.poseLandmarks);
+                } else {
+                    processFrontView(results.poseLandmarks);
+                }
+            } else {
+                plankFrames = 0;
+                statusElement.innerText = "Chờ nhận diện người...";
+            }
+            canvasCtx.restore();
+        }
+
+        const pose = new Pose({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
+        });
+        pose.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        pose.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => { await pose.send({image: videoElement}); },
+            width: 640,
+            height: 480
+        });
+        camera.start();
+    </script>
+</body>
+</html>
